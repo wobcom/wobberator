@@ -1,0 +1,4 @@
+routerIdAssignment:
+  asns:
+    - asn: 4291360022
+      network: "242.23.1.0/24"
