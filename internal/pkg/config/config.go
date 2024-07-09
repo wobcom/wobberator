@@ -10,8 +10,13 @@ type RouterIDAssignmentConfig struct {
 	} `yaml:"asns"`
 }
 
+type HostRouteAssignmentConfig struct {
+	ServiceNetworks []string `yaml:"serviceNetworks"`
+}
+
 type Config struct {
-	RouterIDAssignmentConfig RouterIDAssignmentConfig `yaml:"routerIdAssignment"`
+	RouterIDAssignmentConfig  RouterIDAssignmentConfig  `yaml:"routerIdAssignment"`
+	HostRouteAssignmentConfig HostRouteAssignmentConfig `yaml:"hostRouteAssignment"`
 }
 
 func GetConfig() (*Config, error) {

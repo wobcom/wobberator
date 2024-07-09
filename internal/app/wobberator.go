@@ -2,7 +2,9 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"github.com/vishvananda/netlink"
 	"github.com/wobcom/wobberator/internal/pkg/config"
 	"k8s.io/client-go/kubernetes"
 	"log/slog"
@@ -37,6 +39,118 @@ func getAvailableAddreses(cidr string, alreadyUsedAddresses []netip.Addr) []neti
 	}
 
 	return availableIPs
+}
+
+func EnsureIPAddressesOnInterface(addresses []netip.Addr) error {
+
+	link, err := netlink.LinkByName("antikubermatik")
+	var linkNotFoundError netlink.LinkNotFoundError
+	isLNF := errors.As(err, &linkNotFoundError)
+	if isLNF {
+		dummyAttrs := netlink.LinkAttrs{Name: "antikubermatik"}
+		dummyInterface := netlink.Dummy{LinkAttrs: dummyAttrs}
+		err := netlink.LinkAdd(&dummyInterface)
+		if err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	}
+
+	existingAddresses, err := netlink.AddrList(link, netlink.FAMILY_V6)
+	if err != nil {
+		return err
+	}
+
+	for _, eAddress := range existingAddresses {
+		netAddress := netip.MustParsePrefix(eAddress.String())
+		if !slices.Contains(addresses, netAddress.Addr()) {
+			slog.Info("Removing address from interface", "address", eAddress.String())
+			err := netlink.AddrDel(link, &eAddress)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	for _, ensureAddress := range addresses {
+		netlinkAddress, err := netlink.ParseAddr(fmt.Sprintf("%v/128", ensureAddress.String()))
+		if err != nil {
+			return err
+		}
+		alreadyExists := false
+		for _, eA := range existingAddresses {
+			if netlinkAddress.IP.Equal(eA.IP) {
+				alreadyExists = true
+			}
+		}
+
+		if alreadyExists {
+			continue
+		}
+
+		slog.Info("Adding address to interface", "address", netlinkAddress.String())
+		err = netlink.AddrAdd(link, netlinkAddress)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func RunHostRouteAssignment(ctx context.Context, clientset *kubernetes.Clientset, cfg *config.HostRouteAssignmentConfig) {
+	for {
+
+		allowedNets := make([]netip.Prefix, 0)
+		for _, network := range cfg.ServiceNetworks {
+			prefix := netip.MustParsePrefix(network)
+			allowedNets = append(allowedNets, prefix)
+		}
+
+		services, err := clientset.CoreV1().Services("").List(ctx, metav1.ListOptions{})
+		if err != nil {
+			slog.Error("Unable to fetch services", "err", err)
+		}
+
+		activeServiceIPs := make([]netip.Addr, 0)
+
+		slog.Info("Loaded services", "len", len(services.Items))
+
+		for _, service := range services.Items {
+
+			for _, ingress := range service.Status.LoadBalancer.Ingress {
+				ip, err := netip.ParseAddr(ingress.IP)
+				if err != nil {
+					slog.Warn("ingress.IP was invalid", "err", err, "ip", ingress.IP)
+				}
+
+				isAllowed := false
+				for _, net := range allowedNets {
+					if net.Contains(ip) {
+						isAllowed = true
+					}
+				}
+
+				if !isAllowed {
+					slog.Info("Skipping IP address", "ip", ip.String())
+					continue
+				}
+
+				activeServiceIPs = append(activeServiceIPs, ip)
+
+			}
+
+		}
+
+		err = EnsureIPAddressesOnInterface(activeServiceIPs)
+		if err != nil {
+			slog.Error("Error while ensuring ip addresses on interface", "err", err)
+		}
+
+		time.Sleep(10 * time.Second)
+	}
+
 }
 
 func RunRouterIDAssignment(ctx context.Context, clientset *kubernetes.Clientset, cfg *config.RouterIDAssignmentConfig) {
